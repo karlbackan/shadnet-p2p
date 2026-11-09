@@ -35,6 +35,11 @@ struct SharedState {
         QString npid;
         std::function<void(QByteArray)> send;
         std::function<void(uint64_t)> resetMatchingRoomState;
+        // The session that owns this entry and a queued way to close it: a re-login with the right
+        // password takes over a stale session (game crash, dropped Wi-Fi) instead of failing with
+        // LoginAlreadyLoggedIn (code 6) until the old TCP connection times out.
+        const void* owner = nullptr;
+        std::function<void()> kick;
         uint32_t matchingContextId = 0;
         // Online friends for this session
         // Protected by clientsLock (same lock as the outer clients map).

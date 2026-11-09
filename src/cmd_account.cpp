@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2019-2026 rpcsn Project
 // SPDX-FileCopyrightText: Copyright 2026 shadNet Project
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include <QThread>
 #include <QDateTime>
 #include <QDebug>
 #include "client_session.h"
@@ -88,6 +89,29 @@ ErrorType ClientSession::CmdLogin(StreamExtractor& data, QByteArray& reply) {
     }
 
     {
+        // Take over a stale session of the same account: the password is already checked, so this is
+        // the owner coming back (crash, restart, network drop). Close the old connection and wait for
+        // its cleanup (sessions run on their own threads) before registering this one.
+        std::function<void()> kick;
+        {
+            QReadLocker lk(&m_shared->clientsLock);
+            auto old = m_shared->clients.find(user.userId);
+            if (old != m_shared->clients.end())
+                kick = old->kick;
+        }
+        if (kick) {
+            qInfo() << "Login takes over the previous session of" << npid;
+            kick();
+            for (int i = 0; i < 50; ++i) {
+                {
+                    QReadLocker lk(&m_shared->clientsLock);
+                    if (!m_shared->clients.contains(user.userId))
+                        break;
+                }
+                QThread::msleep(100);
+            }
+            QThread::msleep(300); // let the old session's offline notice go out before we come online
+        }
         QReadLocker lk(&m_shared->clientsLock);
         if (m_shared->clients.contains(user.userId))
             return ErrorType::LoginAlreadyLoggedIn;
@@ -147,6 +171,8 @@ ErrorType ClientSession::CmdLogin(StreamExtractor& data, QByteArray& reply) {
         QWriteLocker lk(&m_shared->clientsLock);
         SharedState::ClientEntry entry;
         entry.npid = npid;
+        entry.owner = this;
+        entry.kick = [this]() { QMetaObject::invokeMethod(m_socket, "disconnectFromHost", Qt::QueuedConnection); };
         entry.appearOffline = req.appear_offline();
         // Title context reported by the emulator at login -> presence gameTitleInfo.
         entry.npTitleId = QString::fromStdString(req.title_id());

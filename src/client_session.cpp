@@ -278,7 +278,8 @@ void ClientSession::CleanupOnDisconnect() {
     {
         QWriteLocker lk(&m_shared->clientsLock);
         auto self = m_shared->clients.find(m_info.userId);
-        if (self != m_shared->clients.end()) {
+        // Only our own entry: after a takeover the map already holds the new session's entry.
+        if (self != m_shared->clients.end() && self->owner == this) {
             selfAppearOffline = self->appearOffline;
             for (auto it = self->friends.begin(); it != self->friends.end(); ++it) {
                 auto friendEntry = m_shared->clients.find(it.key());
