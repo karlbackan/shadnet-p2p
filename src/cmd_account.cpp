@@ -172,7 +172,9 @@ ErrorType ClientSession::CmdLogin(StreamExtractor& data, QByteArray& reply) {
         SharedState::ClientEntry entry;
         entry.npid = npid;
         entry.owner = this;
-        entry.kick = [this]() { QMetaObject::invokeMethod(m_socket, "disconnectFromHost", Qt::QueuedConnection); };
+        // abort(), not a queued "disconnectFromHost" by name: that is no invokable slot in Qt 6 (the
+        // call silently did nothing), and a graceful close waits for a peer that is gone.
+        entry.kick = [sock = m_socket]() { QMetaObject::invokeMethod(sock, [sock]() { sock->abort(); }, Qt::QueuedConnection); };
         entry.appearOffline = req.appear_offline();
         // Title context reported by the emulator at login -> presence gameTitleInfo.
         entry.npTitleId = QString::fromStdString(req.title_id());
