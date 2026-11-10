@@ -192,7 +192,7 @@ void RegisterBloodborneRoutes(QHttpServer& http, bool seamlessCoop, Database* db
             << (broker->IsSeamlessAnywhereSummonsEnabled() ? "enabled" : "disabled");
 
     http.route("/summon_messenger/create", QHttpServerRequest::Method::Post,
-               [broker](const QHttpServerRequest& request) -> QHttpServerResponse {
+               [broker, oneBell](const QHttpServerRequest& request) -> QHttpServerResponse {
                    TraceSummonRequest("create", request);
                    const auto body = ParseRequest(request);
                    if (!body || !Bloodborne::HasRequiredAdvertisementFields(*body)) {
@@ -236,7 +236,7 @@ void RegisterBloodborneRoutes(QHttpServer& http, bool seamlessCoop, Database* db
                });
 
     http.route("/summon_messenger/get", QHttpServerRequest::Method::Post,
-               [broker](const QHttpServerRequest& request) -> QHttpServerResponse {
+               [broker, oneBell](const QHttpServerRequest& request) -> QHttpServerResponse {
                    TraceSummonRequest("get", request);
                    const auto body = ParseRequest(request);
                    if (!body) {
