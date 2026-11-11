@@ -124,9 +124,17 @@ public:
     std::pair<QByteArray, QByteArray> Poll(qint64 user, const QByteArray& role, bool hostFoundNothing,
                                            qint64 nowMs) {
         if (user < 0 || m_db == nullptr || role.isEmpty()) { // no header = an old client
+            if (m_db != nullptr && m_noRoleLogged < 6) { // test aid: the switch is on, a poll came without a role
+                ++m_noRoleLogged;
+                qInfo() << "Bloodborne one-bell: poll without a role header from user" << user;
+            }
             return {};
         }
         std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_lastRole[user] != role) { // test aid: one line per change of a user's role
+            m_lastRole[user] = role;
+            qInfo() << "Bloodborne one-bell: user" << user << "role" << role;
+        }
         if (role == "host" && hostFoundNothing) {
             m_state[user] = {Role::Searching, nowMs};
         } else if (role == "guest") {
@@ -138,7 +146,15 @@ public:
             return {};
         }
         for (const auto& [other, entry] : m_state) {
-            if (other == user || nowMs - entry.atMs > OneBellFreshMs || !MutualFriends(user, other)) {
+            if (other == user || nowMs - entry.atMs > OneBellFreshMs) {
+                continue;
+            }
+            if (!MutualFriends(user, other)) {
+                if (m_notFriendsLogged < 6) {
+                    ++m_notFriendsLogged;
+                    qInfo() << "Bloodborne one-bell: users" << user << "and" << other
+                            << "are not mutual friends in the database: no answer";
+                }
                 continue;
             }
             return {entry.role == Role::Searching ? PartnerSearchingHeader
@@ -165,6 +181,9 @@ private:
     Database* m_db;
     std::mutex m_mutex;
     std::map<qint64, Entry> m_state;
+    std::map<qint64, QByteArray> m_lastRole;
+    int m_noRoleLogged = 0;
+    int m_notFriendsLogged = 0;
 };
 
 void AddHeader(QHttpServerResponse& response, const QByteArray& name, const QByteArray& value) {
