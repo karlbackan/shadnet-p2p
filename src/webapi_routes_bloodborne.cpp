@@ -3,7 +3,9 @@
 #include "webapi_routes_bloodborne.h"
 
 #include <cstdlib>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 
 #include <QDateTime>
@@ -19,6 +21,7 @@
 #include <QString>
 
 #include "bloodborne_summon_broker.h"
+#include "database.h"
 
 namespace WebApiRoutes {
 namespace {
@@ -100,20 +103,96 @@ void TraceSummonRequest(const char* route, const QHttpServerRequest& request) {
     qInfo().noquote() << "Bloodborne summon RE" << route << request.body();
 }
 
+// One-bell join (2026-11-10, opt-in: SHADNET_BLOODBORNE_ONE_BELL=1 here, SHADPS4_BBSC_ONE_BELL=1 in
+// the clients). Each client says in a request header what it is doing: "host" (a search effect is
+// on), "guest" (its own sign is out) or "solo". The server remembers the last host/guest per user
+// for 15 s and, on the poll of a SOLO caller, answers with the partner's id when the partner is a
+// mutual friend who is searching (host, whose own search found nothing) or advertising (guest).
+// The solo caller's game then rings the matching bell itself, so one bell makes a join.
+constexpr auto OneBellRoleHeader = "X-ShadPS4-Bloodborne-One-Bell";
+constexpr auto PartnerSearchingHeader = "X-ShadPS4-Bloodborne-Partner-Searching";
+constexpr auto PartnerAdvertisingHeader = "X-ShadPS4-Bloodborne-Partner-Advertising";
+constexpr qint64 OneBellFreshMs = 15'000;
+
+class OneBell {
+public:
+    explicit OneBell(Database* db) : m_db(db) {}
+
+    // role: "host", "guest" or anything else (= solo). hostFoundNothing: a host's search that
+    // returned no sign (a host that found one is being served by the normal path).
+    // Returns the header name/value to answer with, empty name = none.
+    std::pair<QByteArray, QByteArray> Poll(qint64 user, const QByteArray& role, bool hostFoundNothing,
+                                           qint64 nowMs) {
+        if (user < 0 || m_db == nullptr || role.isEmpty()) { // no header = an old client
+            return {};
+        }
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (role == "host" && hostFoundNothing) {
+            m_state[user] = {Role::Searching, nowMs};
+        } else if (role == "guest") {
+            m_state[user] = {Role::Advertising, nowMs};
+        } else {
+            m_state.erase(user); // solo, or a host that found a sign: nothing to offer
+        }
+        if (role != "solo") {
+            return {};
+        }
+        for (const auto& [other, entry] : m_state) {
+            if (other == user || nowMs - entry.atMs > OneBellFreshMs || !MutualFriends(user, other)) {
+                continue;
+            }
+            return {entry.role == Role::Searching ? PartnerSearchingHeader
+                                                  : PartnerAdvertisingHeader,
+                    QByteArray::number(other)};
+        }
+        return {};
+    }
+
+private:
+    enum class Role { Searching, Advertising };
+    struct Entry {
+        Role role;
+        qint64 atMs;
+    };
+
+    bool MutualFriends(qint64 a, qint64 b) {
+        const auto [result, status] = m_db->GetRelStatus(a, b);
+        const auto friendBit = static_cast<uint8_t>(FriendStatus::Friend);
+        return result == Database::RelResult::Ok && (status.caller & friendBit) &&
+               (status.other & friendBit);
+    }
+
+    Database* m_db;
+    std::mutex m_mutex;
+    std::map<qint64, Entry> m_state;
+};
+
+void AddHeader(QHttpServerResponse& response, const QByteArray& name, const QByteArray& value) {
+    if (name.isEmpty()) {
+        return;
+    }
+    QHttpHeaders headers = response.headers();
+    if (headers.append(name, value)) {
+        response.setHeaders(std::move(headers));
+    }
+}
+
 } // namespace
 
-void RegisterBloodborneRoutes(QHttpServer& http, bool seamlessCoop) {
+void RegisterBloodborneRoutes(QHttpServer& http, bool seamlessCoop, Database* db) {
     seamlessCoop = seamlessCoop || EnvEnabled("SHADNET_BLOODBORNE_SEAMLESS_COOP");
     Bloodborne::SummonBroker::Options options;
     options.seamlessCoop = seamlessCoop;
     auto broker = std::make_shared<Bloodborne::SummonBroker>(options);
+    // Off unless SHADNET_BLOODBORNE_ONE_BELL is set (and a database is there for the friend check).
+    const auto oneBell = std::make_shared<OneBell>(EnvEnabled("SHADNET_BLOODBORNE_ONE_BELL") ? db : nullptr);
 
     qInfo() << "Bloodborne summon routes registered; seamless co-op"
             << (broker->IsSeamlessCoopEnabled() ? "enabled" : "disabled") << "anywhere summons"
             << (broker->IsSeamlessAnywhereSummonsEnabled() ? "enabled" : "disabled");
 
     http.route("/summon_messenger/create", QHttpServerRequest::Method::Post,
-               [broker](const QHttpServerRequest& request) -> QHttpServerResponse {
+               [broker, oneBell](const QHttpServerRequest& request) -> QHttpServerResponse {
                    TraceSummonRequest("create", request);
                    const auto body = ParseRequest(request);
                    if (!body || !Bloodborne::HasRequiredAdvertisementFields(*body)) {
@@ -145,11 +224,19 @@ void RegisterBloodborneRoutes(QHttpServer& http, bool seamlessCoop) {
                    qInfo() << "Bloodborne summon: advertised user"
                            << Integer(*body, QStringLiteral("UserId")) << "session"
                            << body->value(QStringLiteral("SessionId")).toString();
-                   return SummonResponse(QStringLiteral("SummonDataCreateResponse"));
+                   QHttpServerResponse created =
+                       SummonResponse(QStringLiteral("SummonDataCreateResponse"));
+                   // One-bell: a sign is out, so a searching friend's next poll hears about it.
+                   const auto [name, value] =
+                       oneBell->Poll(Integer(*body, QStringLiteral("UserId"), -1),
+                                     request.value(OneBellRoleHeader), false,
+                                     QDateTime::currentMSecsSinceEpoch());
+                   AddHeader(created, name, value);
+                   return created;
                });
 
     http.route("/summon_messenger/get", QHttpServerRequest::Method::Post,
-               [broker](const QHttpServerRequest& request) -> QHttpServerResponse {
+               [broker, oneBell](const QHttpServerRequest& request) -> QHttpServerResponse {
                    TraceSummonRequest("get", request);
                    const auto body = ParseRequest(request);
                    if (!body) {
@@ -161,7 +248,17 @@ void RegisterBloodborneRoutes(QHttpServer& http, bool seamlessCoop) {
                    qInfo() << "Bloodborne summon: search for user"
                            << Integer(*body, QStringLiteral("UserId")) << "returned"
                            << signs.size();
-                   return SummonListResponse(signs);
+                   QHttpServerResponse listed = SummonListResponse(signs);
+                   const auto [name, value] =
+                       oneBell->Poll(Integer(*body, QStringLiteral("UserId"), -1),
+                                     request.value(OneBellRoleHeader), signs.isEmpty(),
+                                     QDateTime::currentMSecsSinceEpoch());
+                   if (!name.isEmpty()) {
+                       qInfo() << "Bloodborne one-bell: answering user"
+                               << Integer(*body, QStringLiteral("UserId")) << name << value;
+                   }
+                   AddHeader(listed, name, value);
+                   return listed;
                });
 
     http.route("/summon_messenger/delete", QHttpServerRequest::Method::Post,

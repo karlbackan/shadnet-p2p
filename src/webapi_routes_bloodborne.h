@@ -3,9 +3,12 @@
 #pragma once
 
 class QHttpServer;
+class Database;
 
 namespace WebApiRoutes {
 
-void RegisterBloodborneRoutes(QHttpServer& http, bool seamlessCoop);
+// db: only used by the opt-in one-bell join (SHADNET_BLOODBORNE_ONE_BELL=1) for the mutual-friend
+// check; nullptr = no friend check possible, so the one-bell join stays off.
+void RegisterBloodborneRoutes(QHttpServer& http, bool seamlessCoop, Database* db = nullptr);
 
 } // namespace WebApiRoutes
