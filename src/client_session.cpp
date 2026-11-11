@@ -187,6 +187,8 @@ ErrorType ClientSession::DispatchCommand(CommandType cmd, StreamExtractor& se, Q
         return CmdRemoveBlock(se);
     case CommandType::SetAppearOffline:
         return CmdSetAppearOffline(se);
+    case CommandType::SetWorldState:
+        return CmdSetWorldState(se);
     case CommandType::GetServerFeatures:
         return CmdGetServerFeatures(reply);
     case CommandType::GetBoardInfos:
@@ -454,6 +456,60 @@ ErrorType ClientSession::CmdSetAppearOffline(StreamExtractor& data) {
         }
     }
     return ErrorType::NoError;
+}
+
+// bbport: the client's "my player is in the game world" report (every ~10 s).
+ErrorType ClientSession::CmdSetWorldState(StreamExtractor& data) {
+    shadnet::SetWorldStateRequest req;
+    if (!decodeProto(req, data) || data.error())
+        return ErrorType::Malformed;
+    EvaluateWorldState(req.in_world() ? 1 : 0);
+    return ErrorType::NoError;
+}
+
+// Applies a report (or just the 30 s expiry, report -1) to this user's entry and, when the state
+// friends were last told differs, pushes a FriendStatus (online, with the new world) to them. Runs
+// on this session's thread (command dispatch or the world timer); the lock is released before any
+// send, as in the other presence pushes.
+void ClientSession::EvaluateWorldState(int report) {
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    QString myNpid;
+    uint8_t state = 0;
+    QVector<std::function<void(QByteArray)>> senders;
+    {
+        QWriteLocker lk(&m_shared->clientsLock);
+        auto self = m_shared->clients.find(m_info.userId);
+        // Only our own entry, and only a client that declared the reports at login.
+        if (self == m_shared->clients.end() || self->owner != this || !self->worldReports)
+            return;
+        if (report >= 0) {
+            self->world = report ? 2 : 1;
+            self->worldAtMs = nowMs;
+        }
+        state = SharedState::WorldStateOf(*self, nowMs);
+        if (state == self->worldPushed)
+            return;
+        self->worldPushed = state;
+        if (self->appearOffline)
+            return; // invisible: friends see us offline whatever the world state
+        myNpid = self->npid;
+        for (auto fr = self->friends.cbegin(); fr != self->friends.cend(); ++fr) {
+            auto fit = m_shared->clients.find(fr.key());
+            if (fit != m_shared->clients.end() && fit->send)
+                senders.append(fit->send);
+        }
+    }
+    qInfo() << "World state" << myNpid << (state == 2 ? "in the game" : "at the title");
+    shadnet::NotifyFriendStatus ns;
+    ns.set_npid(myNpid.toStdString());
+    ns.set_online(true);
+    ns.set_timestamp(static_cast<uint64_t>(nowMs) * 1'000'000ULL);
+    ns.set_world(state);
+    QByteArray payload;
+    appendProto(payload, ns);
+    const QByteArray pkt = BuildNotification(NotificationType::FriendStatus, payload);
+    for (const auto& send : senders)
+        send(pkt);
 }
 
 void ClientSession::EmitPresenceGameTitleInfo() {

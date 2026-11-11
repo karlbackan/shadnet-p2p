@@ -141,6 +141,7 @@ ErrorType ClientSession::CmdLogin(StreamExtractor& data, QByteArray& reply) {
     shadnet::LoginReply pb;
     pb.set_avatar_url(user.avatarUrl.toStdString());
     pb.set_user_id(static_cast<uint64_t>(user.userId));
+    pb.set_world_reports(true); // bbport: this server accepts SetWorldState
 
     {
         QReadLocker lk(&m_shared->clientsLock);
@@ -150,6 +151,8 @@ ErrorType ClientSession::CmdLogin(StreamExtractor& data, QByteArray& reply) {
             // Appear-Offline friends are reported offline.
             const auto fit = m_shared->clients.constFind(friendId);
             fe->set_online(fit != m_shared->clients.constEnd() && !fit->appearOffline);
+            if (fit != m_shared->clients.constEnd() && !fit->appearOffline)
+                fe->set_world(SharedState::WorldStateOf(*fit, QDateTime::currentMSecsSinceEpoch()));
             // presence field intentionally left empty
         }
     }
@@ -176,6 +179,11 @@ ErrorType ClientSession::CmdLogin(StreamExtractor& data, QByteArray& reply) {
         // call silently did nothing), and a graceful close waits for a peer that is gone.
         entry.kick = [sock = m_socket]() { QMetaObject::invokeMethod(sock, [sock]() { sock->abort(); }, Qt::QueuedConnection); };
         entry.appearOffline = req.appear_offline();
+        // bbport: a client that declares SetWorldState starts at "title" (it has just logged in).
+        entry.worldReports = req.world_reports();
+        entry.world = req.world_reports() ? 1 : 0;
+        entry.worldAtMs = QDateTime::currentMSecsSinceEpoch();
+        entry.worldPushed = entry.world;
         // Title context reported by the emulator at login -> presence gameTitleInfo.
         entry.npTitleId = QString::fromStdString(req.title_id());
         entry.titleName = QString::fromStdString(req.title_name());
@@ -208,6 +216,7 @@ ErrorType ClientSession::CmdLogin(StreamExtractor& data, QByteArray& reply) {
         shadnet::NotifyFriendStatus ns;
         ns.set_npid(npid.toStdString());
         ns.set_online(true);
+        ns.set_world(req.world_reports() ? 1 : 0);
         ns.set_timestamp(
             static_cast<uint64_t>(QDateTime::currentDateTimeUtc().toMSecsSinceEpoch()) *
             1'000'000ULL);
@@ -227,6 +236,16 @@ ErrorType ClientSession::CmdLogin(StreamExtractor& data, QByteArray& reply) {
                     QString(), 0, QStringLiteral("np:service:presence:onlineStatus"), QByteArray(),
                     npid, friendNpid)));
         }
+    }
+
+    if (req.world_reports()) {
+        // 5 s expiry check: an in-world report older than 30 s turns into "at the title".
+        if (m_worldTimer == nullptr) {
+            m_worldTimer = new QTimer(this);
+            m_worldTimer->setInterval(5000);
+            connect(m_worldTimer, &QTimer::timeout, this, [this]() { EvaluateWorldState(-1); });
+        }
+        m_worldTimer->start();
     }
 
     qInfo() << "Authenticated:" << npid;

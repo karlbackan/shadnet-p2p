@@ -45,6 +45,8 @@ enum class CommandType : uint16_t {
     GetToken = 39,
     // Presence: mid-session Appear-Offline toggle (payload: SetAppearOfflineRequest).
     SetAppearOffline = 40,
+    // bbport: "my player is in the game world" report (payload: SetWorldStateRequest), every ~10 s.
+    SetWorldState = 50,
     // Matchmaking
     ContextStart = 100,
     CreateRoom = 101,

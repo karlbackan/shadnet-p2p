@@ -14,6 +14,7 @@
 #include <QSet>
 #include <QSslSocket>
 #include <QStringList>
+#include <QTimer>
 #include <QTcpSocket>
 #include <database.h>
 #include "config.h"
@@ -54,6 +55,15 @@ struct SharedState {
         QString platform = QStringLiteral("PS4");
         qint64 presenceUpdatedAt = 0;
         bool appearOffline = false;
+        // bbport world state (2026-11-11), protected by clientsLock. worldReports = the client's
+        // login declared it sends SetWorldState; world 1 = at the title, 2 = in the game world, as
+        // last reported at worldAtMs (wall clock); worldPushed = the value friends were last told.
+        // An in-world report older than kWorldStaleMs counts as "at the title". Clients that did
+        // not declare it stay at 0 (unknown) for everyone.
+        bool worldReports = false;
+        uint8_t world = 0;
+        qint64 worldAtMs = 0;
+        uint8_t worldPushed = 0;
         // Sticky notificationWithData: once a presence PUT sets notificationWithData=true,
         // game-status/game-data update events carry the current status/data until the user
         // ends the game, goes offline, or DELETEs game data.
@@ -61,6 +71,15 @@ struct SharedState {
     };
     QHash<int64_t, ClientEntry> clients;
     QHash<QString, int64_t> npidToUserId; // reverse lookup, protected by clientsLock
+
+    // bbport: how long an in-world report holds before the user reads "at the title" again.
+    static constexpr qint64 kWorldStaleMs = 30000;
+    // The world state friends are told: 0 unknown (client never declared it), 1 title, 2 in world.
+    static uint8_t WorldStateOf(const ClientEntry& e, qint64 nowMs) {
+        if (!e.worldReports)
+            return 0;
+        return (e.world == 2 && nowMs - e.worldAtMs <= kWorldStaleMs) ? 2 : 1;
+    }
 
     // Matchmaking shared state
     MatchingSharedState matching;
@@ -203,6 +222,9 @@ public:
     ErrorType CmdAddBlock(StreamExtractor& data);
     ErrorType CmdRemoveBlock(StreamExtractor& data);
     ErrorType CmdSetAppearOffline(StreamExtractor& data);
+    ErrorType CmdSetWorldState(StreamExtractor& data);
+    // report: -1 = timer (expiry check only), 0 = client says title, 1 = client says in world.
+    void EvaluateWorldState(int report);
 
     // commands cmd_score.cpp
     ErrorType CmdGetBoardInfos(StreamExtractor& data, QByteArray& reply);
@@ -290,6 +312,7 @@ private:
     QByteArray m_readBuf;
     std::unique_ptr<Database> m_db;
     ClientInfo m_info;
+    QTimer* m_worldTimer = nullptr; // 5 s expiry check for the in-world report, created at login
     MatchingSessionState m_matching;
 };
 

@@ -22,11 +22,19 @@ message LoginRequest {
     string title_id    = 4;  // running title serial (param.sfo TITLE_ID), for presence gameTitleInfo
     string title_name  = 5;  // running title name (param.sfo TITLE)
     bool appear_offline = 6; // user's Appear-Offline preference (handled as offline by others)
+    bool world_reports = 7;  // bbport: this client sends SetWorldState (the server then starts it at "title")
 }
 
 // Mid-session Appear-Offline toggle.
 message SetAppearOfflineRequest {
     bool appear_offline = 1;
+}
+
+// bbport: command SetWorldState (50), sent every ~10 s by a client whose game is running. in_world =
+// the player is in the game world (not at the title, in a menu or loading a save). The server keeps
+// a per-user timestamp; a report older than 30 s counts as "at the title".
+message SetWorldStateRequest {
+    bool in_world = 1;
 }
 
 message ServerFeaturesReply {
@@ -37,6 +45,7 @@ message FriendEntry {
     string npid     = 1;
     bool   online   = 2;
     bytes  presence = 3;
+    uint32 world    = 4;  // bbport: 0 unknown (old client), 1 at the title, 2 in the game world
 }
 
 message LoginReply {
@@ -46,6 +55,7 @@ message LoginReply {
     repeated string      friend_requests_sent     = 4;
     repeated string      friend_requests_received = 5;
     repeated string      blocked                  = 6;
+    bool                 world_reports            = 7;  // bbport: the server accepts SetWorldState
 }
 
 message RegistrationRequest {
@@ -86,6 +96,7 @@ message NotifyFriendStatus {
     string npid      = 1;
     bool   online    = 2;
     uint64 timestamp = 3;  // nanoseconds since Unix epoch
+    uint32 world     = 4;  // bbport: 0 unknown, 1 at the title, 2 in the game world (online only)
 }
 
 // Score: board configuration
