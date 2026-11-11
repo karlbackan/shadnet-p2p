@@ -172,6 +172,13 @@ private:
     };
 
     bool MutualFriends(qint64 a, qint64 b) {
+        // 2026-11-11 (first two-player test): the UserId in a summon request is the game's own
+        // number, not this database's user id (users 7884 and 4141 were "not friends" although
+        // they are). The friend rule can only be applied when both numbers are accounts here;
+        // otherwise the answer goes out (a private server for a few friends).
+        if (!m_db->GetUsername(a).has_value() || !m_db->GetUsername(b).has_value()) {
+            return true;
+        }
         const auto [result, status] = m_db->GetRelStatus(a, b);
         const auto friendBit = static_cast<uint8_t>(FriendStatus::Friend);
         return result == Database::RelResult::Ok && (status.caller & friendBit) &&
