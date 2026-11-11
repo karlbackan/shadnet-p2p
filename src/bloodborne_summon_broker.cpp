@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bloodborne_summon_broker.h"
 
+#include <QDebug>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -415,6 +416,24 @@ QList<QByteArray> SummonBroker::Search(const QJsonObject& request, qint64 nowMs,
     std::vector<Candidate> candidates;
     const qint64 requester = Integer(request, QStringLiteral("UserId"), -1);
     const bool anywhereSummons = m_seamlessCoop && m_seamlessAnywhereSummons;
+    // 2026-11-11: a claimed sign is kept for 15 min so the host can summon the guest again during
+    // a session, and it was handed back to the host's search long after the guest had left (the
+    // host then hosted against a player who was not there; a host ringing first found this
+    // leftover instead of nothing). A game only searches while it is solo or hosting - a guest in
+    // a session and a player with a sign out do not - so a search by a sign's own owner means
+    // that owner is no guest any more: its claimed signs go.
+    if (m_seamlessCoop && requester >= 0) {
+        for (auto it = m_records.begin(); it != m_records.end();) {
+            if (IsSeamlessActiveState(it->state) &&
+                Integer(it->advertisement, QStringLiteral("UserId"), -1) == requester) {
+                qInfo() << "Bloodborne summon: user" << requester
+                        << "searches again - its claimed sign is dropped";
+                it = m_records.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
     const std::optional<qint64> hostMap = HostPlacementMap(hostPlacement);
     for (auto it = m_records.begin(); it != m_records.end(); ++it) {
         if (it->state == State::Advertised &&
